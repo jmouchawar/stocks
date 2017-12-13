@@ -1,0 +1,321 @@
+---
+title: "Forecasting-stocks"
+author: "Jason Mouchawar"
+date: "11/7/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Forecasting Stock Prices with a LogNormal Random Walk
+
+In this project, we will attempt to forecast stock prices. First, we will use R's [quantmod](https://www.quantmod.com/) package to scrape data from Yahoo! Finance. Then, we will perform an exploratory analysis on both Facebook and Apple's stock prices. Finally, we will apply a LogNormal random walk to simulate n forecasts in addition to the expected forecast with 95% confidence bands.
+
+```{r packages, message=FALSE, warning=FALSE}
+library(TSA)
+library(quantmod)
+library(ggplot2)
+```
+```{r data, message=FALSE, warning=FALSE}
+getSymbols('AAPL')
+getSymbols('FB')
+```
+```{r set.time.window, echo=FALSE}
+AAPL = AAPL[time(AAPL) > min(time(FB))]
+```
+## Exploring Stock Movement
+
+Let's visualize the adjusted closes of Apple and Facebook's stock over the past 5 years. It is apparent that both stock prices tend to increase over time but there does not appear to be any obvious seasonality to either of the time series.
+
+```{r adjcloseprices, echo=FALSE, message=FALSE, warning=FALSE}
+mainplot = ggplot() + theme_classic()
+mainplot + theme(legend.position=c(.15,.95)) +
+  geom_line(data=AAPL, aes( x=time(AAPL), y=AAPL.Adjusted, color='Apple' )) + 
+  geom_line(data=FB, aes( x=time(FB), y=FB.Adjusted, color='Facebook' )) +
+  labs(title='Adjusted Close Prices', x='Time', y='Adj. Close') +
+  scale_colour_manual("", values = c("Apple"="seagreen2", "Facebook"="deepskyblue1")) +
+  scale_x_date(limits=c(min(time(AAPL)),max(time(AAPL))))
+```
+
+The [autocorrelation](https://en.wikipedia.org/wiki/Autocorrelation) between times s and t is defined as $$ R(s,t) = \frac{\operatorname{E}[(X_t - \mu_t)(X_s - \mu_s)]}{\sigma_t\sigma_s}\ $$
+It is important to investigate autocorrelation in our series. Positive autocorrelation results in underestimation of standard errors which constricts the width of confidence intervals and inflates the probability of committing a [Type I Error](https://en.wikipedia.org/wiki/Type_I_and_type_II_errors#Type_I_error) (false positive). Autocorrelation can be detected by examining the detrended series.  
+
+Here is a function for plotting the ACF/PACF of a time series using ggplot2.  
+```{r correlograms}
+plot_correlograms = function(x, conflevel=.95, lagmax=20, title='Correlograms'){
+  # Function creates a prettier ACF/PACF using ggplot2
+  # Args: x (xts) --------- your data. Must be data suitable for acf() and pacf(). Quantmod getSymbols() uses xts object.
+  #       conflevel (numeric) -- confidence level for interval bands
+  #       lagmax (numeric) ------ maximum number of lags to plot
+  #       title (string) -------- title of plot
+  # Return: ACF/PACF as a ggplot object
+  
+  CIline = qnorm((1 - conflevel)/2)/sqrt(length(x))
+  
+  
+  tmpacf = acf(x, lag.max=lagmax, plot=FALSE, na.action=na.omit)
+  tmppacf = pacf(x, lag.max=lagmax, plot=FALSE, na.action=na.omit)
+  pltdf = data.frame(lag=rep(tmpacf$lag,2),
+                     vals=c(tmpacf$acf,tmppacf$acf),
+                     type=c(rep('ACF',lagmax),rep('PACF',lagmax)))
+  
+  siglag = ( abs(pltdf[,2]) > abs(CIline) )
+  for(i in 1:length(siglag)){
+    if(siglag[i]==TRUE){
+      siglag[i]='red'
+    }else{
+      siglag[i]='black'
+    }
+  }
+  pltdf = cbind(pltdf, siglag)
+  
+  plt = ggplot(data=pltdf, mapping=aes( x=lag, y=vals )) + theme_classic() +
+    geom_hline(yintercept=0) +
+    geom_segment(mapping=aes( xend = lag, yend = 0 ), color=siglag) +
+    geom_hline(yintercept=CIline, color='blue') + geom_hline(yintercept=-CIline, color='blue') +
+    facet_grid(type ~ .) +
+    labs(title=title, y='', x='Lag')
+  
+  return(plt)
+  
+}
+```
+
+
+#### Exploring Apple
+```{r AAPLdiff, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(data=AAPL, aes( time(AAPL), (diff(AAPL$AAPL.Adjusted)) )) + geom_line() + labs(title='1st Order Differencing', x='Time Index', y='Difference')
+```  
+
+With a 1st order difference, the Apple stock series appears to have become approximately stationary. We can further examine the autocorrelation in the data by plotting the values returned by the autocorrelation function and partial autocorrelation function in a pair of correlograms
+
+```{r appleACF}
+plot_correlograms(diff(AAPL$AAPL.Adjusted), conflevel=.95, lagmax=30, title='Correlograms of Differenced Series')
+```
+
+Overall, we observe what appears to be white noise.
+
+#### Similarly with Facebook
+
+```{r FBdiff, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(data=FB, aes( time(FB), (diff(FB$FB.Adjusted)) )) + geom_line() + labs(title='1st Order Differencing', x='Time Index', y='Difference')
+```
+```{r fbACF}
+plot_correlograms(diff(FB$FB.Adjusted), conflevel=.95, lagmax=30, title='Correlograms of Differenced Series')
+```
+
+There are a few slightly significant autocorrelations. Due to differencing, there is no sinusoidal or constant decreasing pattern in the ACF and values are distributed closely to 0. We also do not see any evidence of an autoregressive process in the PACF. Because we are conducting multiple tests, these significances are likely spurious. Again we observe a series that appears to be white nosie.  
+
+We can conclude that these series follow a random walk. It can be shown that $$ \frac{y_t}{y_{t-1}} \sim LogNormal(\mu,\sigma^2) $$ where $y_t$ is the daily adjusted close price of a stock. The daily return ratio follows a LogNormal distribution with parameters $\mu$ and $\sigma^2$. 
+
+
+## Forecasting Facebook
+```{r dailyRRfunc}
+daily_return_ratio = function(x){
+  # Calculates the daily return ratios
+  # Args: x (xts vector) -- your data
+  # Returns: a vector of ratios r (length = dim(x)[1] - 1)
+  
+  r = NULL
+  for(i in 2:length(x)){
+    ratio = coredata(x)[i]/coredata(x)[i-1]
+    r = c(r,ratio)
+  }
+  return(r)
+}
+
+```
+```{r ratiohist, echo=FALSE}
+fb_ratios = daily_return_ratio(FB[,6])
+
+ggplot() + 
+  geom_histogram(aes(fb_ratios),binwidth=.005, fill='deepskyblue1',alpha=.8) +
+  labs(title='Distribution of Facebook Daily Return Ratios', y='Frequency', x='Daily Return Ratio')
+```
+
+
+#### Simulation
+
+Using the MASS package, we can estimate the parameters of the lognormal distibution using maximum likelihood estimation methodology, denoted $\mu_{mle}$, $\sigma^2_{mle}$ . We can use this distribution to forecast next day stock prices with a lognormal random walk model. If $$ \frac{y_t}{y_{t-1}} \sim LogN(\mu_{mle},\sigma^2_{mle}) \quad \Longrightarrow \quad y_{t+1} = y_t * LogN(\mu_{mle},\sigma^2_{mle}) $$  
+
+For details on ML Estimation with MASS, see [fitdistr()](https://stat.ethz.ch/R-manual/R-devel/library/MASS/html/fitdistr.html) documentation.  
+
+The following functions simulate forecasts and plots them.
+```{r simrandomwalk}
+library(MASS)
+
+random_walk_sim = function(data, window, nahead){
+  # Forecasts stock prices using a lognormal random walk
+  # Args: data (xts vector) ---- your training data
+  #       window (numeric) ----- number of trading days to use for MLE of lognormal params
+  #       nahead (numeric) ----- number of days to forecast
+  # Returns: xts vector of predicted stock prices of length nahead
+  
+  nTrain = length(data)
+  forecasts = NULL
+  times = NULL
+  dataTrain = data
+ 
+  for(i in 0:nahead){
+
+    dataTrain_fc = dataTrain[(nTrain-window+i):(nTrain+i)]
+    
+    lnorm.params = fitdistr(daily_return_ratio(dataTrain_fc), 'lognormal')
+    forecast = tail(dataTrain_fc,n=1) * rlnorm(n=1, meanlog=lnorm.params$estimate[1], sdlog=lnorm.params$estimate[2])
+    
+    forecasts = c(forecasts, forecast)
+    times = c(times, max(index(dataTrain))+1)
+    dataTrain = c( dataTrain, xts( as.numeric(forecast),( max(time(dataTrain))+1 ) ) )
+    
+  }
+  
+  return(dataTrain[(nTrain+1):(nTrain+nahead)])
+  
+}
+```
+```{r plotforecasts}
+plot_forecasts = function(data, window, nahead, train_on=.95, nsims){
+  # Plots simulated forecasts
+  # Args: data (xts) ---------- your data
+  #       window (numeric) ---- number of trading days to use for MLE of lognormal params
+  #       nahead (numeric) ---- number of days to forecast
+  #       train_on (numeric) -- % of days to use (from start of series) for training
+  #       nsims (numeric) ----- number of simulated forecasts to plot
+  # Returns: ggplot2 plot of simulated forecasts
+  # implement optional training w/ missing()
+  
+  training = data[1:round(train_on*dim(data)[1]),6]
+        
+  forecastsims = data.frame( replicate(nsims,numeric(nahead)) )
+  for(simnum in colnames(forecastsims)){
+    
+    forecastsims[simnum] = random_walk_sim(training, window, nahead)
+    
+  }
+  
+  forecastsims = data.frame(forecastsims,time=time(forecastsims[,1]))
+  
+  simforecastPlot = ggplot() + 
+    theme_classic() + 
+    geom_line(data=data, aes( x=time(data), y=data[,6] ), color='deepskyblue1') +
+    labs(title='Simulated LogNormal Random Walk Forecasts', x='Time', y='Adj. Close')
+  
+  for(simnum in colnames(forecastsims[-(nsims+1)])){
+    simforecastPlot = simforecastPlot + 
+      geom_line(data=forecastsims, aes_string(x='time', y=simnum), color='pink', alpha=.7)
+    
+  }
+  
+  return(simforecastPlot)
+
+}
+```
+
+Lets simulate 10 forecasts forecasting 150 days into the future with a training window of 100 days. We will use the first 90% of the data to estimate the parameters of the initial Log Normal distribution and shift the training window forward in time with each new prediction in order to use our predictions to estimate new parameters with each step. Allows us to evaluate our model with test data. We cannot use the test data in our predictions.
+```{r sims, message=FALSE, warning=FALSE}
+plot_forecasts(data=FB, window=200, nahead=100, nsims=10)
+```
+
+While simulation is an excellent tool, what we really want is the expected forecast at any time *t + n*.
+
+#### Expected Forecast
+
+##### Deriving the n-step ahead expected value
+
+If $Y = log(X) \sim N(\mu,\sigma^2)\quad \Longrightarrow \quad MGF of Y \quad \psi(t) = e^{\mu t + .5\sigma^2 t^2}$  
+
+$\psi(t) = E[e^{tY}]$  
+$\qquad = E[e^{tlog(X)}]$  
+$\qquad = E[X^t]$  
+
+Using rules of MGFs, we can get expectation and variance  
+$E[X] = \psi(1) = e^{\mu t + .5\sigma^2}$ 
+
+$Var[X] = \psi(2) - \psi(1)^2$  
+$\quad \quad \enspace = e^{2\mu-\sigma^2} \cdot (e^{\sigma^2}-1)$
+
+n-day ahead expectation proof  
+$\hat{y}_{t+n} \quad = \quad y_{t+(n-1)}\cdot E[X]$    
+$\qquad \quad = \enspace y_t\cdot E[X]^n$  
+$\qquad \quad = \enspace y_t\cdot (e^{\mu+.5\sigma^2})^n$  
+
+Expected value and variance of a LogNormal as R functions:
+```{r expected}
+get_expval = function(mu, sigma){
+  return( exp(mu + .5 * sigma**2) )
+}
+
+get_var = function(mu, sigma){
+  return( exp(2*mu - sigma**2) * (exp(sigma**2) - 1) )
+}
+```
+
+##### Deriving the n-step ahead variance
+
+PROOF
+
+```{r nstepvar}
+get_nahead_variance = function(mu, sigma, yt, n){
+  # Calculates n-step ahead expected forecast
+  # Args: mu ------ parameter mu
+  #       sigma --- parameter sigma
+  #       yt ------ price of stock at time t
+  #       n ------- number of steps ahead
+  # Returns: variance
+  
+  return( yt**2 * (get_var(mu,sigma) + get_expval(mu,sigma)**2)**n - get_expval(mu,sigma)**(2*n) )
+}
+```
+
+We can use the functions above to create an expected forecast and can plot our expected forecast with confidence bands:
+
+```{r expected_forecast}
+expected_randwalk = function(data, window_size, nahead){
+  # Steps through desired forecast range calculating expected price and variance of that estimate
+  # Args: data --------- time series
+  #       window_size -- size of window for MLE of lognormal params
+  #       nahead ------- number of days to forecast
+  # Returns: data frame of estimates. Col1 = ExpVal, Col2 = Var
+  
+  exp_X = NULL
+  var_X = NULL
+  window = tail(data[,6], n=window_size)
+  last_price = tail(window, n=nahead)[1]
+  yt = last_price
+  
+  for(step in 0:nahead){
+    mu = fitdistr( daily_return_ratio(window),'lognormal' )$estimate[1]
+    sigma = fitdistr( daily_return_ratio(window),'lognormal' )$estimate[2]
+    exp_X[step] = last_price * get_expval(mu, sigma)
+    var_X[step] = get_nahead_variance(mu, sigma, last_price, n=step)
+    last_price = last_price * get_expval(mu, sigma)
+  }
+  
+  return(cbind(exp_X,sqrt(var_X)))
+}
+```
+```{r plot_expected}
+plot_exp_forecast = function(data, window, nahead, error=2){
+  
+  mu = expected_randwalk(data, window, nahead)[,1]
+  var = expected_randwalk(data, window, nahead)[,2]
+  CI_ll = mu - (error*sqrt(var))
+  CI_ul = mu + (error*sqrt(var))
+
+  expforecastPlot = ggplot() + theme_classic() + 
+    geom_line(data=data, aes( x=time(data), y=data[,6] ), color='deepskyblue1') +
+    labs(title='Expected LogNormal Random Walk Forecasts', x='Time', y='Adj. Close') +
+    geom_line(aes(x=time(tail(FB,nahead)), y=mu), color='red') +
+    geom_ribbon(aes(ymin=CI_ll, ymax=CI_ul, x=time(tail(FB,nahead)), fill='band'), alpha=.3)
+  
+  return(expforecastPlot)
+}
+```
+
+Using the functions defined above, we can visualize Facebook's expected forecast and confidence bands:
+
+```{r plotting2}
+plot_exp_forecast(FB,200,100)
+```
