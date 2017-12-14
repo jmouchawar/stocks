@@ -6,6 +6,8 @@ Here is a project that explores and forecasts stock movement using a LogNormal R
 
 ### Index
 
-- .R: contains functions and data cleaning which are used in the markdown document
-- .Rmd: the finalized report in a Rmarkdown file
-- 
+- forecast_stocks.R: contains functions and data cleaning which are used in the markdown document
+- forecast_stock_growth.Rmd: the finalized report in a Rmarkdown file
+- forecast_stock_growth.html: the finalized report in an html file 
+
+Display the final writeup in a Rmarkdown file, using [BitBucket HTML Preview](https://github.com/htmlpreview/htmlpreview.github.com), by clicking [here](http://htmlpreview.github.io/?https://github.com/jmouchawar/stocks/blob/master/forecast_stock_growth.html).
